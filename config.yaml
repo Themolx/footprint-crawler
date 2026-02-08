@@ -1,11 +1,12 @@
 crawler:
-  concurrency: 8
-  page_timeout_ms: 30000
-  consent_timeout_ms: 10000
-  post_consent_wait_ms: 5000
-  scroll_delay_ms: 2000
-  inter_site_delay_ms: 2000
-  max_retries: 2
+  concurrency: 16
+  page_timeout_ms: 45000
+  consent_timeout_ms: 15000
+  post_consent_wait_ms: 60000     # 60s after consent click — trackers cascade
+  final_dwell_ms: 15000           # 15s final wait after scrolling
+  scroll_delay_ms: 1500
+  inter_site_delay_ms: 1000
+  max_retries: 3
   screenshot: false
   headless: true
 
@@ -35,6 +36,12 @@ consent_patterns:
     - "Rozumím"
     - "Přijmout a zavřít"
     - "Přijmout cookies"
+    - "accept cookies"
+    - "accept"
+    - "agree"
+    - "allow all"
+    - "povolit všechny"
+    - "povolit cookies"
     - "OK"
   reject:
     - "odmítnout vše"
@@ -45,6 +52,13 @@ consent_patterns:
     - "pouze technické"
     - "jen nezbytné"
     - "Odmítnout vše"
+    - "reject"
+    - "decline"
+    - "deny all"
+    - "only necessary"
+    - "only essential"
+    - "nezbytné cookies"
+    - "necessary only"
 
 sites_file: "data/sites/czech_top_100.csv"
 

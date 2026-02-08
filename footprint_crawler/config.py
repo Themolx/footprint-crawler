@@ -11,12 +11,13 @@ import yaml
 @dataclass
 class CrawlerSettings:
     concurrency: int = 8
-    page_timeout_ms: int = 30000
-    consent_timeout_ms: int = 10000
-    post_consent_wait_ms: int = 5000
-    scroll_delay_ms: int = 2000
-    inter_site_delay_ms: int = 2000
-    max_retries: int = 2
+    page_timeout_ms: int = 45000
+    consent_timeout_ms: int = 15000
+    post_consent_wait_ms: int = 60000  # 60s after consent — trackers cascade for a long time
+    final_dwell_ms: int = 15000        # additional wait after scrolling
+    scroll_delay_ms: int = 1500
+    inter_site_delay_ms: int = 1000
+    max_retries: int = 3
     screenshot: bool = False
     headless: bool = True
 

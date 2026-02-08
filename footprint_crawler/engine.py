@@ -1,8 +1,8 @@
 """Core Playwright crawl engine.
 
 Handles a single (site, consent_mode) crawl: creates a fresh browser context,
-navigates, intercepts requests, handles consent, scrolls, captures cookies,
-and returns a CrawlResult.
+navigates, intercepts requests, handles consent, dwells for 60s to capture
+cascading tracker activity, scrolls, captures cookies, and returns a CrawlResult.
 """
 
 from __future__ import annotations
@@ -10,8 +10,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 
-from playwright.async_api import Browser, Request as PWRequest, Response as PWResponse
+from playwright.async_api import Browser, Dialog, Request as PWRequest, Response as PWResponse
 
 from .config import CrawlerConfig
 from .consent import ConsentHandler
@@ -36,6 +37,10 @@ from .utils import (
 logger = logging.getLogger(__name__)
 
 
+# Callback type for live progress reporting
+ProgressCallback = None  # will be a callable if provided
+
+
 async def crawl_site(
     browser: Browser,
     site: SiteInfo,
@@ -43,16 +48,29 @@ async def crawl_site(
     config: CrawlerConfig,
     tracker_db: TrackerDatabase,
     consent_handler: ConsentHandler,
+    on_progress: callable | None = None,
 ) -> CrawlResult:
     """Crawl a single site in the specified consent mode.
 
     Creates a fresh browser context, navigates to the site, intercepts all
-    requests, handles cookie consent, scrolls, and captures all tracking data.
+    requests, handles cookie consent, dwells to let trackers cascade,
+    scrolls, and captures all tracking data.
+
+    Args:
+        on_progress: Optional callback(phase, detail) for live status updates.
     """
     started_at = now_iso()
     start_time = time.monotonic()
     captured_requests: list[RequestRecord] = []
     site_reg_domain = extract_registered_domain(site.url)
+
+    # Request count at various phases
+    pre_consent_request_count = 0
+    post_consent_request_count = 0
+
+    def _notify(phase: str, detail: str = "") -> None:
+        if on_progress:
+            on_progress(phase, detail)
 
     context = None
     try:
@@ -73,6 +91,16 @@ async def crawl_site(
         )
 
         page = await context.new_page()
+
+        # Auto-dismiss JavaScript dialogs (alerts, confirms, prompts)
+        async def _handle_dialog(dialog: Dialog) -> None:
+            logger.debug("Auto-dismissing %s dialog on %s", dialog.type, site.domain)
+            try:
+                await dialog.dismiss()
+            except Exception:
+                pass
+
+        page.on("dialog", _handle_dialog)
 
         # Set up request interception BEFORE navigation
         request_timestamps: dict[str, float] = {}
@@ -97,14 +125,12 @@ async def crawl_site(
             request_timestamps[request.url] = time.monotonic()
 
         def on_response(response: PWResponse) -> None:
-            # Update the matching request record with response data
             req_url = response.request.url
             for record in reversed(captured_requests):
                 if record.url == req_url and record.status_code is None:
                     record.status_code = response.status
                     try:
-                        headers = response.headers
-                        content_length = headers.get("content-length")
+                        content_length = response.headers.get("content-length")
                         if content_length:
                             record.response_size_bytes = int(content_length)
                     except Exception:
@@ -116,7 +142,8 @@ async def crawl_site(
         page.on("request", on_request)
         page.on("response", on_response)
 
-        # Navigate to the site
+        # ── Phase 1: Navigate ──
+        _notify("loading", site.url)
         try:
             await page.goto(
                 site.url,
@@ -141,10 +168,11 @@ async def crawl_site(
 
         load_time_ms = int((time.monotonic() - start_time) * 1000)
 
-        # Wait a moment for async scripts to fire
-        await asyncio.sleep(1)
+        # Wait for async scripts to fire
+        await asyncio.sleep(2)
 
-        # Capture pre-consent cookies
+        # ── Phase 2: Capture pre-consent state ──
+        _notify("pre-consent")
         pre_consent_cookies: set[tuple[str, str]] = set()
         try:
             raw_cookies = await context.cookies()
@@ -152,73 +180,66 @@ async def crawl_site(
         except Exception:
             pass
 
-        # Handle cookie consent
+        pre_consent_request_count = len(captured_requests)
+
+        # ── Phase 3: Handle cookie consent ──
         consent_info = ConsentInfo(banner_detected=False)
         if mode != ConsentMode.IGNORE:
+            _notify("consent", mode.value)
             try:
                 consent_info = await consent_handler.handle_consent(
                     page, mode, config.crawler.consent_timeout_ms
                 )
-                if consent_info.action_taken:
-                    # Wait for post-consent tracking to fire
-                    await asyncio.sleep(config.crawler.post_consent_wait_ms / 1000)
             except Exception as e:
                 logger.warning("Consent handling failed on %s: %s", site.url, e)
                 consent_info = ConsentInfo(banner_detected=False)
 
-        # Scroll page to trigger lazy-loaded trackers
+            # ── Phase 4: Post-consent dwell (60s) ──
+            if consent_info.action_taken:
+                dwell_seconds = config.crawler.post_consent_wait_ms / 1000
+                _notify("dwell", f"{int(dwell_seconds)}s post-consent")
+                logger.info(
+                    "Dwelling %ds post-consent on %s (%s)",
+                    int(dwell_seconds), site.domain, mode.value,
+                )
+
+                # Dwell in chunks, logging new requests periodically
+                chunk = 5  # check every 5s
+                elapsed_dwell = 0.0
+                while elapsed_dwell < dwell_seconds:
+                    wait = min(chunk, dwell_seconds - elapsed_dwell)
+                    await asyncio.sleep(wait)
+                    elapsed_dwell += wait
+                    new_req = len(captured_requests) - pre_consent_request_count
+                    _notify("dwell", f"{int(elapsed_dwell)}/{int(dwell_seconds)}s — {new_req} new req")
+
+                post_consent_request_count = len(captured_requests) - pre_consent_request_count
+                logger.info(
+                    "Post-consent dwell captured %d new requests on %s",
+                    post_consent_request_count, site.domain,
+                )
+
+        # ── Phase 5: Scroll to trigger lazy-loaded trackers ──
+        _notify("scrolling")
         try:
-            for _ in range(4):
+            for i in range(4):
                 await page.evaluate("window.scrollBy(0, window.innerHeight / 2)")
                 await asyncio.sleep(config.crawler.scroll_delay_ms / 1000)
         except Exception:
             pass
 
-        # Wait for final tracking requests
-        await asyncio.sleep(3)
+        # ── Phase 6: Final dwell ──
+        final_dwell_s = config.crawler.final_dwell_ms / 1000
+        if final_dwell_s > 0:
+            _notify("final-wait", f"{int(final_dwell_s)}s")
+            await asyncio.sleep(final_dwell_s)
 
-        # Capture final cookies
-        cookies: list[CookieRecord] = []
-        try:
-            raw_cookies = await context.cookies()
-            current_time = time.time()
-            for c in raw_cookies:
-                expires = c.get("expires", -1)
-                is_session = expires <= 0
-                expires_at = None
-                lifetime_days = None
-                if not is_session and expires > 0:
-                    from datetime import datetime, timezone
+        # ── Phase 7: Capture final state ──
+        _notify("capturing")
+        cookies = await _capture_cookies(
+            context, tracker_db, pre_consent_cookies,
+        )
 
-                    expires_at = datetime.fromtimestamp(expires, tz=timezone.utc).isoformat()
-                    lifetime_days = (expires - current_time) / 86400
-
-                cookie_domain = c.get("domain", "")
-                was_before_consent = (c["name"], cookie_domain) in pre_consent_cookies
-                entity, _ = tracker_db.classify(cookie_domain.lstrip("."))
-
-                cookies.append(CookieRecord(
-                    name=c["name"],
-                    domain=cookie_domain,
-                    value_hash=hash_cookie_value(c.get("value", "")),
-                    path=c.get("path", "/"),
-                    expires_at=expires_at,
-                    lifetime_days=lifetime_days,
-                    is_secure=c.get("secure", False),
-                    is_http_only=c.get("httpOnly", False),
-                    same_site=c.get("sameSite", "None"),
-                    is_session=is_session,
-                    is_tracking_cookie=tracker_db.is_tracking_cookie(
-                        c["name"], cookie_domain.lstrip(".")
-                    ),
-                    tracker_entity=entity,
-                    set_before_consent=was_before_consent,
-                    timestamp=now_iso(),
-                ))
-        except Exception as e:
-            logger.warning("Failed to capture cookies on %s: %s", site.url, e)
-
-        # Capture page metadata
         page_title = None
         final_url = None
         try:
@@ -227,7 +248,7 @@ async def crawl_site(
         except Exception:
             pass
 
-        # Take screenshot if configured
+        # Screenshot
         screenshot_path = None
         if config.crawler.screenshot:
             try:
@@ -273,3 +294,50 @@ async def crawl_site(
                 await context.close()
             except Exception:
                 pass
+
+
+async def _capture_cookies(
+    context,
+    tracker_db: TrackerDatabase,
+    pre_consent_cookies: set[tuple[str, str]],
+) -> list[CookieRecord]:
+    """Capture all cookies from the browser context."""
+    cookies: list[CookieRecord] = []
+    try:
+        raw_cookies = await context.cookies()
+        current_time = time.time()
+        for c in raw_cookies:
+            expires = c.get("expires", -1)
+            is_session = expires <= 0
+            expires_at = None
+            lifetime_days = None
+            if not is_session and expires > 0:
+                expires_at = datetime.fromtimestamp(expires, tz=timezone.utc).isoformat()
+                lifetime_days = (expires - current_time) / 86400
+
+            cookie_domain = c.get("domain", "")
+            was_before_consent = (c["name"], cookie_domain) in pre_consent_cookies
+            entity, _ = tracker_db.classify(cookie_domain.lstrip("."))
+
+            cookies.append(CookieRecord(
+                name=c["name"],
+                domain=cookie_domain,
+                value_hash=hash_cookie_value(c.get("value", "")),
+                path=c.get("path", "/"),
+                expires_at=expires_at,
+                lifetime_days=lifetime_days,
+                is_secure=c.get("secure", False),
+                is_http_only=c.get("httpOnly", False),
+                same_site=c.get("sameSite", "None"),
+                is_session=is_session,
+                is_tracking_cookie=tracker_db.is_tracking_cookie(
+                    c["name"], cookie_domain.lstrip(".")
+                ),
+                tracker_entity=entity,
+                set_before_consent=was_before_consent,
+                timestamp=now_iso(),
+            ))
+    except Exception as e:
+        logger.warning("Failed to capture cookies: %s", e)
+
+    return cookies
