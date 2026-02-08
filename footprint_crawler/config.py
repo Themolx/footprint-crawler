@@ -68,6 +68,33 @@ class OutputSettings:
 
 
 @dataclass
+class FingerprintingSettings:
+    enabled: bool = True
+
+
+@dataclass
+class AdsSettings:
+    enabled: bool = True
+    min_width: int = 50
+    min_height: int = 50
+    iab_tolerance_pct: float = 10.0
+
+
+@dataclass
+class AdCaptureSettings:
+    enabled: bool = True
+    max_captures: int = 20
+    output_dir: str = "data/ad_captures"
+    crop_fallback: bool = True
+
+
+@dataclass
+class ResourceWeightSettings:
+    enabled: bool = True
+    measure_body_size: bool = False
+
+
+@dataclass
 class CrawlerConfig:
     project_root: Path = field(default_factory=lambda: Path.cwd())
     crawler: CrawlerSettings = field(default_factory=CrawlerSettings)
@@ -76,6 +103,10 @@ class CrawlerConfig:
     consent_patterns: ConsentPatterns = field(default_factory=ConsentPatterns)
     output: OutputSettings = field(default_factory=OutputSettings)
     sites_file: str = "data/sites/czech_top_100.csv"
+    fingerprinting: FingerprintingSettings = field(default_factory=FingerprintingSettings)
+    ads: AdsSettings = field(default_factory=AdsSettings)
+    ad_capture: AdCaptureSettings = field(default_factory=AdCaptureSettings)
+    resource_weight: ResourceWeightSettings = field(default_factory=ResourceWeightSettings)
 
     def resolve_path(self, relative_path: str) -> Path:
         """Resolve a relative path against the project root."""
@@ -128,6 +159,10 @@ def load_config(path: str | Path) -> CrawlerConfig:
         consent_patterns=_build_nested(ConsentPatterns, raw.get("consent_patterns")),
         output=_build_nested(OutputSettings, raw.get("output")),
         sites_file=raw.get("sites_file", "data/sites/czech_top_100.csv"),
+        fingerprinting=_build_nested(FingerprintingSettings, raw.get("fingerprinting")),
+        ads=_build_nested(AdsSettings, raw.get("ads")),
+        ad_capture=_build_nested(AdCaptureSettings, raw.get("ad_capture")),
+        resource_weight=_build_nested(ResourceWeightSettings, raw.get("resource_weight")),
     )
 
     return config

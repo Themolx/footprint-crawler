@@ -43,6 +43,15 @@ consent_patterns:
     - "povolit všechny"
     - "povolit cookies"
     - "OK"
+    # Additional patterns from banner_detection_analysis
+    - "pokračovat"
+    - "přijímám"
+    - "ano, souhlasím"
+    - "přijmout všechny"
+    - "akceptovat"
+    - "Přijmout všechny cookies"
+    - "Souhlasím se vším"
+    - "Přijmout vše"
   reject:
     - "odmítnout vše"
     - "odmítnout"
@@ -59,9 +68,37 @@ consent_patterns:
     - "only essential"
     - "nezbytné cookies"
     - "necessary only"
+    # Additional patterns from banner_detection_analysis
+    - "jen nezbytné cookies"
+    - "pouze základní"
+    - "zamítnout"
+    - "nepřijímám"
+    - "pokračovat bez souhlasu"
+    - "Pouze nezbytné cookies"
+    - "Odmítnout a zavřít"
 
 sites_file: "data/sites/czech_top_100.csv"
 
 output:
   export_dir: "output/"
   screenshot_dir: "output/screenshots/"
+
+# Phase 2 modules
+fingerprinting:
+  enabled: true
+
+ads:
+  enabled: true
+  min_width: 50
+  min_height: 50
+  iab_tolerance_pct: 10.0
+
+ad_capture:
+  enabled: true
+  max_captures: 20
+  output_dir: "data/ad_captures"
+  crop_fallback: true
+
+resource_weight:
+  enabled: true
+  measure_body_size: false

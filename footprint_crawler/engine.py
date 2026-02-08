@@ -3,6 +3,9 @@
 Handles a single (site, consent_mode) crawl: creates a fresh browser context,
 navigates, intercepts requests, handles consent, dwells for 60s to capture
 cascading tracker activity, scrolls, captures cookies, and returns a CrawlResult.
+
+Phase 2 additions: fingerprinting detection, ad detection, ad capture,
+and resource weight classification.
 """
 
 from __future__ import annotations
@@ -14,8 +17,11 @@ from datetime import datetime, timezone
 
 from playwright.async_api import Browser, Dialog, Request as PWRequest, Response as PWResponse
 
+from .ad_capture import AdCapturer
+from .ads import AdDetector
 from .config import CrawlerConfig
 from .consent import ConsentHandler
+from .fingerprint import FingerprintDetector
 from .models import (
     ConsentInfo,
     ConsentMode,
@@ -25,6 +31,7 @@ from .models import (
     RequestRecord,
     SiteInfo,
 )
+from .resource_weight import ResourceWeightClassifier
 from .tracker_db import TrackerDatabase
 from .utils import (
     extract_hostname,
@@ -49,6 +56,12 @@ async def crawl_site(
     tracker_db: TrackerDatabase,
     consent_handler: ConsentHandler,
     on_progress: callable | None = None,
+    # Phase 2 modules (optional — if None, that phase is skipped)
+    fingerprint_detector: FingerprintDetector | None = None,
+    resource_classifier: ResourceWeightClassifier | None = None,
+    ad_detector: AdDetector | None = None,
+    ad_capturer: AdCapturer | None = None,
+    run_id: str | None = None,
 ) -> CrawlResult:
     """Crawl a single site in the specified consent mode.
 
@@ -58,6 +71,11 @@ async def crawl_site(
 
     Args:
         on_progress: Optional callback(phase, detail) for live status updates.
+        fingerprint_detector: If provided, injects JS hooks and collects fingerprint events.
+        resource_classifier: If provided, classifies each request into a resource category.
+        ad_detector: If provided, scans DOM for ad elements after dwell.
+        ad_capturer: If provided, screenshots each detected ad element.
+        run_id: Identifier for this crawl run (used for ad capture output directory).
     """
     started_at = now_iso()
     start_time = time.monotonic()
@@ -102,6 +120,10 @@ async def crawl_site(
 
         page.on("dialog", _handle_dialog)
 
+        # ── Phase 2: Inject fingerprint monitoring BEFORE any page JS ──
+        if fingerprint_detector:
+            await fingerprint_detector.inject_monitoring(page)
+
         # Set up request interception BEFORE navigation
         request_timestamps: dict[str, float] = {}
 
@@ -121,6 +143,13 @@ async def crawl_site(
                 tracker_category=category,
                 timestamp=now_iso(),
             )
+
+            # Phase 2: classify resource category
+            if resource_classifier:
+                record.resource_category = resource_classifier.classify_request(
+                    record, site_reg_domain,
+                )
+
             captured_requests.append(record)
             request_timestamps[request.url] = time.monotonic()
 
@@ -133,6 +162,13 @@ async def crawl_site(
                         content_length = response.headers.get("content-length")
                         if content_length:
                             record.response_size_bytes = int(content_length)
+                    except Exception:
+                        pass
+                    # Phase 2: capture content-type
+                    try:
+                        ct = response.headers.get("content-type")
+                        if ct:
+                            record.content_type = ct
                     except Exception:
                         pass
                     if req_url in request_timestamps:
@@ -236,6 +272,48 @@ async def crawl_site(
 
         # ── Phase 7: Capture final state ──
         _notify("capturing")
+
+        # Phase 2: Collect fingerprint events
+        fingerprint_result = None
+        if fingerprint_detector:
+            try:
+                _notify("fingerprint", "collecting")
+                fingerprint_result = await fingerprint_detector.collect_results(page)
+            except Exception as e:
+                logger.debug("Fingerprint collection failed on %s: %s", site.domain, e)
+
+        # Phase 2: Detect ad elements
+        ad_detection_result = None
+        if ad_detector:
+            try:
+                _notify("ads", "scanning")
+                ad_detection_result = await ad_detector.detect_ads(page)
+            except Exception as e:
+                logger.debug("Ad detection failed on %s: %s", site.domain, e)
+
+        # Phase 2: Capture individual ad screenshots
+        ad_capture_result = None
+        if ad_capturer and ad_detection_result and ad_detection_result.ads:
+            try:
+                _notify("ads", f"capturing {len(ad_detection_result.ads)} ads")
+                ad_capture_result = await ad_capturer.capture_ads(
+                    page,
+                    ad_detection_result.ads,
+                    run_id or "default",
+                    site.domain,
+                    mode.value,
+                )
+            except Exception as e:
+                logger.debug("Ad capture failed on %s: %s", site.domain, e)
+
+        # Phase 2: Aggregate resource weight
+        resource_weight = None
+        if resource_classifier:
+            try:
+                resource_weight = resource_classifier.aggregate(captured_requests)
+            except Exception as e:
+                logger.debug("Resource weight aggregation failed: %s", e)
+
         cookies = await _capture_cookies(
             context, tracker_db, pre_consent_cookies,
         )
@@ -275,6 +353,10 @@ async def crawl_site(
             cookies=cookies,
             consent_info=consent_info,
             screenshot_path=screenshot_path,
+            fingerprint_result=fingerprint_result,
+            ad_detection_result=ad_detection_result,
+            ad_capture_result=ad_capture_result,
+            resource_weight=resource_weight,
         )
 
     except Exception as e:

@@ -8,15 +8,20 @@ import csv
 import logging
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from playwright.async_api import async_playwright
 
+from .ad_capture import AdCapturer
+from .ads import AdDetector
 from .config import CrawlerConfig, load_config
 from .consent import ConsentHandler
 from .db import Database
 from .engine import crawl_site
+from .fingerprint import FingerprintDetector
 from .models import ConsentMode, CrawlStatus, SiteInfo
+from .resource_weight import ResourceWeightClassifier
 from .tracker_db import TrackerDatabase
 from .utils import normalize_url
 
@@ -75,6 +80,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--no-color", action="store_true",
         help="Disable colored output",
     )
+    # Phase 2 CLI flags
+    parser.add_argument(
+        "--no-fingerprint", action="store_true",
+        help="Disable fingerprint detection",
+    )
+    parser.add_argument(
+        "--no-ads", action="store_true",
+        help="Disable ad detection entirely",
+    )
+    parser.add_argument(
+        "--no-ad-capture", action="store_true",
+        help="Skip individual ad screenshots (still detects/counts ads)",
+    )
+    parser.add_argument(
+        "--ad-capture-limit", type=int, default=None,
+        help="Max ad screenshots per session (default: 20)",
+    )
+    parser.add_argument(
+        "--measure-body-size", action="store_true",
+        help="Read response bodies for accurate resource size (slower)",
+    )
     return parser.parse_args(argv)
 
 
@@ -124,6 +150,11 @@ class ProgressDisplay:
         self.total_tracking = 0
         self.banners_detected = 0
         self.banners_acted = 0
+        # Phase 2 counters
+        self.total_fp_events = 0
+        self.total_ads = 0
+        self.total_ad_captures = 0
+        self.total_tracker_bytes = 0
         self.start_time = time.monotonic()
         self.use_color = use_color
         self._active_tasks: dict[str, str] = {}  # domain -> phase
@@ -171,7 +202,7 @@ class ProgressDisplay:
     def remove_active(self, domain: str) -> None:
         self._active_tasks.pop(domain, None)
 
-    def print_result(self, result: CrawlResult) -> None:
+    def print_result(self, result) -> None:
         """Print a completed task result on its own line."""
         self.completed += 1
         req_count = len(result.requests)
@@ -192,6 +223,18 @@ class ProgressDisplay:
             self.banners_detected += 1
             if consent.action_taken:
                 self.banners_acted += 1
+
+        # Phase 2 counters
+        if result.fingerprint_result:
+            self.total_fp_events += len(result.fingerprint_result.events)
+        if result.ad_detection_result:
+            self.total_ads += result.ad_detection_result.total_ad_count
+        if result.ad_capture_result:
+            self.total_ad_captures += result.ad_capture_result.total_captured
+        if result.resource_weight:
+            self.total_tracker_bytes += (
+                result.resource_weight.tracker_bytes + result.resource_weight.ad_bytes
+            )
 
         # Format the completed line
         elapsed_s = 0
@@ -249,6 +292,15 @@ class ProgressDisplay:
         else:
             cook_str += self._c(_DIM, " (0 trk)")
 
+        # Phase 2 mini summary
+        p2_parts = []
+        if result.fingerprint_result and result.fingerprint_result.events:
+            sev = result.fingerprint_result.severity.value
+            p2_parts.append(f"fp:{sev}")
+        if result.ad_detection_result and result.ad_detection_result.total_ad_count > 0:
+            p2_parts.append(f"ads:{result.ad_detection_result.total_ad_count}")
+        p2_str = self._c(_DIM, " " + "|".join(p2_parts)) if p2_parts else ""
+
         # Clear status line and print result
         sys.stdout.write(_CLEAR_LINE)
         print(
@@ -257,7 +309,7 @@ class ProgressDisplay:
             f"{domain:<28} {mode_str:<8} "
             f"{cat_str:<14} "
             f"{req_str}  {cook_str}"
-            f"{consent_str}"
+            f"{consent_str}{p2_str}"
             f"  {self._c(_DIM, _format_duration(elapsed_s))}"
         )
 
@@ -275,6 +327,20 @@ class ProgressDisplay:
         print(f"  Concurrency: {config.crawler.concurrency}  |  "
               f"Post-consent dwell: {config.crawler.post_consent_wait_ms // 1000}s  |  "
               f"Headless: {config.crawler.headless}")
+
+        # Phase 2 module status
+        modules = []
+        if config.fingerprinting.enabled:
+            modules.append("fingerprint")
+        if config.ads.enabled:
+            modules.append("ads")
+        if config.ad_capture.enabled:
+            modules.append("ad-capture")
+        if config.resource_weight.enabled:
+            modules.append("resource-weight")
+        if modules:
+            print(f"  Phase 2: {', '.join(modules)}")
+
         print(self._c(_DIM, "  " + "-" * 60))
         print()
 
@@ -297,6 +363,18 @@ class ProgressDisplay:
         print()
         print(f"  Banners found   {self.banners_detected}")
         print(f"  Banners clicked {self.banners_acted}")
+
+        # Phase 2 summary
+        if self.total_fp_events or self.total_ads or self.total_ad_captures:
+            print()
+            print(self._c(_BOLD, "  Phase 2"))
+            print(f"  FP events       {self.total_fp_events:,}")
+            print(f"  Ads detected    {self.total_ads:,}")
+            print(f"  Ad captures     {self.total_ad_captures:,}")
+            if self.total_tracker_bytes > 0:
+                mb = self.total_tracker_bytes / (1024 * 1024)
+                print(f"  Tracker bytes   {mb:,.1f} MB (tracker + ad)")
+
         print()
         print(f"  Database        {db_path}")
         print(self._c(_DIM, "  " + "=" * 60))
@@ -363,6 +441,37 @@ async def main(args: argparse.Namespace) -> None:
     # Initialize consent handler
     consent_handler = ConsentHandler(config.consent_patterns)
 
+    # ── Phase 2: Initialize new modules ──
+    fingerprint_detector = None
+    if not args.no_fingerprint and config.fingerprinting.enabled:
+        fingerprint_detector = FingerprintDetector(config.fingerprinting, tracker_db)
+
+    resource_classifier = None
+    if config.resource_weight.enabled:
+        if args.measure_body_size:
+            config.resource_weight.measure_body_size = True
+        resource_classifier = ResourceWeightClassifier(config.resource_weight, tracker_db)
+
+    ad_detector = None
+    if not args.no_ads and config.ads.enabled:
+        ad_detector = AdDetector(config.ads)
+
+    ad_capturer = None
+    if not args.no_ad_capture and config.ad_capture.enabled:
+        if args.ad_capture_limit is not None:
+            config.ad_capture.max_captures = args.ad_capture_limit
+        ad_capturer = AdCapturer(config.ad_capture)
+
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Apply Phase 2 CLI overrides to disable modules
+    if args.no_fingerprint:
+        config.fingerprinting.enabled = False
+    if args.no_ads:
+        config.ads.enabled = False
+    if args.no_ad_capture:
+        config.ad_capture.enabled = False
+
     # Insert sites into database
     for site in sites:
         await db.upsert_site(site)
@@ -410,6 +519,11 @@ async def main(args: argparse.Namespace) -> None:
                         browser, site, mode, config,
                         tracker_db, consent_handler,
                         on_progress=on_progress,
+                        fingerprint_detector=fingerprint_detector,
+                        resource_classifier=resource_classifier,
+                        ad_detector=ad_detector,
+                        ad_capturer=ad_capturer,
+                        run_id=run_id,
                     )
 
                     if result.status == CrawlStatus.SUCCESS or attempt >= config.crawler.max_retries:

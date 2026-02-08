@@ -1,0 +1,14 @@
+consent_cmp,consent_mode,sessions,sites,avg_tracking_cookies,avg_3p_requests,consent_actions_taken
+custom,accept,18,18,4.8,66.8,18
+custom,reject,14,14,1.3,73.1,14
+text_match,accept,14,13,6.9,83.1,14
+css_banner,accept,9,9,6.3,114.4,9
+css_banner,reject,8,8,0.9,98.4,8
+text_match,reject,7,7,3.9,58.4,7
+onetrust,accept,4,3,10.0,102.3,4
+cookiebot,accept,4,2,1.5,40.8,3
+cookiebot,reject,4,2,0.0,38.5,4
+onetrust,reject,3,2,0.7,39.7,3
+iframe_text,accept,1,1,0.0,13.0,1
+iframe_text,reject,1,1,0.0,36.0,1
+ok_fallback,accept,1,1,5.0,42.0,1

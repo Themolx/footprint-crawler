@@ -1,0 +1,32 @@
+tracker_entity,tracker_category,accept_sites,ignore_sites,reject_sites,accept_requests,ignore_requests,reject_requests
+Google,analytics,69,68,67,1067,839,848
+Google,advertising,52,44,43,456,346,396
+Google,cdn,39,38,37,624,574,657
+Seznam.cz,analytics,42,34,33,1214,1222,842
+Gemius,analytics,32,32,31,155,148,138
+Meta,advertising,29,16,15,83,41,40
+Adform,advertising,25,18,16,254,186,192
+Criteo,advertising,18,13,13,106,86,85
+R2B2,advertising,13,13,13,41,35,48
+Seznam.cz,advertising,12,14,10,85,113,51
+Microsoft,analytics,15,10,10,148,94,106
+Cloudflare,analytics,9,9,9,17,16,17
+Cloudflare,cdn,7,7,7,71,68,72
+Xandr,advertising,8,6,5,86,82,94
+Amazon,cdn,4,4,4,541,505,558
+Twitter/X,social,6,3,3,15,7,7
+TikTok,social,6,2,2,134,37,38
+Adobe,cdn,3,3,3,17,17,17
+Google,social,3,3,3,139,109,120
+Hotjar,analytics,5,2,2,6,2,2
+Meta,social,3,3,3,29,25,29
+Microsoft,advertising,5,2,2,27,8,8
+LinkedIn,cdn,4,2,2,31,26,28
+LinkedIn,social,3,1,1,35,20,59
+New Relic,analytics,1,1,2,7,3,10
+Heureka Group,analytics,1,1,1,16,10,10
+Meta,cdn,1,1,1,59,59,59
+Sentry,analytics,1,1,1,2,1,1
+Twitter/X,cdn,1,1,1,58,60,60
+Quantcast,advertising,,1,,,1,
+The Trade Desk,advertising,1,,,5,,

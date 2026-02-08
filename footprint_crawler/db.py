@@ -40,7 +40,35 @@ CREATE TABLE IF NOT EXISTS crawl_sessions (
     consent_action_taken BOOLEAN,
     screenshot_path TEXT,
     error TEXT,
-    status TEXT NOT NULL
+    status TEXT NOT NULL,
+    -- Phase 2: fingerprinting
+    fp_severity TEXT,
+    fp_event_count INTEGER DEFAULT 0,
+    fp_canvas BOOLEAN DEFAULT 0,
+    fp_webgl BOOLEAN DEFAULT 0,
+    fp_audio BOOLEAN DEFAULT 0,
+    fp_font BOOLEAN DEFAULT 0,
+    fp_navigator BOOLEAN DEFAULT 0,
+    fp_storage BOOLEAN DEFAULT 0,
+    fp_unique_apis INTEGER DEFAULT 0,
+    fp_unique_entities INTEGER DEFAULT 0,
+    -- Phase 2: ad detection
+    ad_count INTEGER DEFAULT 0,
+    ad_visible_count INTEGER DEFAULT 0,
+    ad_density REAL DEFAULT 0.0,
+    ad_total_area_px INTEGER DEFAULT 0,
+    ad_iab_standard_count INTEGER DEFAULT 0,
+    -- Phase 2: ad capture
+    ad_captures_total INTEGER DEFAULT 0,
+    ad_captures_failed INTEGER DEFAULT 0,
+    -- Phase 2: resource weight
+    rw_total_bytes INTEGER DEFAULT 0,
+    rw_content_1p_bytes INTEGER DEFAULT 0,
+    rw_cdn_bytes INTEGER DEFAULT 0,
+    rw_tracker_bytes INTEGER DEFAULT 0,
+    rw_ad_bytes INTEGER DEFAULT 0,
+    rw_functional_3p_bytes INTEGER DEFAULT 0,
+    rw_unknown_3p_bytes INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS requests (
@@ -56,7 +84,9 @@ CREATE TABLE IF NOT EXISTS requests (
     status_code INTEGER,
     response_size_bytes INTEGER,
     timing_ms REAL,
-    timestamp TEXT
+    timestamp TEXT,
+    resource_category TEXT,
+    content_type TEXT
 );
 
 CREATE TABLE IF NOT EXISTS cookies (
@@ -78,14 +108,60 @@ CREATE TABLE IF NOT EXISTS cookies (
     timestamp TEXT
 );
 
+CREATE TABLE IF NOT EXISTS fingerprint_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES crawl_sessions(id),
+    api TEXT NOT NULL,
+    method TEXT NOT NULL,
+    call_stack_domain TEXT,
+    tracker_entity TEXT,
+    details TEXT,
+    timestamp TEXT
+);
+
+CREATE TABLE IF NOT EXISTS ad_elements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES crawl_sessions(id),
+    selector TEXT,
+    tag_name TEXT,
+    ad_id TEXT,
+    ad_class TEXT,
+    x REAL,
+    y REAL,
+    width REAL,
+    height REAL,
+    is_visible BOOLEAN,
+    is_iframe BOOLEAN,
+    iframe_src TEXT,
+    iab_size TEXT,
+    ad_network TEXT
+);
+
+CREATE TABLE IF NOT EXISTS ad_captures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES crawl_sessions(id),
+    ad_element_id INTEGER REFERENCES ad_elements(id),
+    ad_index INTEGER,
+    screenshot_path TEXT,
+    metadata_path TEXT,
+    width INTEGER,
+    height INTEGER,
+    capture_method TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_site ON crawl_sessions(site_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_mode ON crawl_sessions(consent_mode);
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON crawl_sessions(status);
 CREATE INDEX IF NOT EXISTS idx_requests_session ON requests(session_id);
 CREATE INDEX IF NOT EXISTS idx_requests_domain ON requests(domain);
 CREATE INDEX IF NOT EXISTS idx_requests_tracker ON requests(tracker_entity);
+CREATE INDEX IF NOT EXISTS idx_requests_category ON requests(resource_category);
 CREATE INDEX IF NOT EXISTS idx_cookies_session ON cookies(session_id);
 CREATE INDEX IF NOT EXISTS idx_cookies_domain ON cookies(domain);
+CREATE INDEX IF NOT EXISTS idx_fp_events_session ON fingerprint_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_fp_events_api ON fingerprint_events(api);
+CREATE INDEX IF NOT EXISTS idx_ad_elements_session ON ad_elements(session_id);
+CREATE INDEX IF NOT EXISTS idx_ad_captures_session ON ad_captures(session_id);
 """
 
 
@@ -145,7 +221,7 @@ class Database:
         return await cursor.fetchone() is not None
 
     async def save_crawl_result(self, result: CrawlResult) -> int:
-        """Save a complete crawl result (session + requests + cookies)."""
+        """Save a complete crawl result (session + requests + cookies + Phase 2 data)."""
         assert self._conn is not None
 
         site_id = await self.upsert_site(result.site)
@@ -159,6 +235,42 @@ class Database:
         button_text = consent.button_text if consent else None
         action_taken = consent.action_taken if consent else None
 
+        # Phase 2: fingerprinting summary
+        fp = result.fingerprint_result
+        fp_severity = fp.severity.value if fp else None
+        fp_event_count = len(fp.events) if fp else 0
+        fp_canvas = fp.canvas_detected if fp else False
+        fp_webgl = fp.webgl_detected if fp else False
+        fp_audio = fp.audio_detected if fp else False
+        fp_font = fp.font_detected if fp else False
+        fp_navigator = fp.navigator_detected if fp else False
+        fp_storage = fp.storage_detected if fp else False
+        fp_unique_apis = fp.unique_apis if fp else 0
+        fp_unique_entities = fp.unique_entities if fp else 0
+
+        # Phase 2: ad detection summary
+        ad = result.ad_detection_result
+        ad_count = ad.total_ad_count if ad else 0
+        ad_visible_count = ad.visible_ad_count if ad else 0
+        ad_density = ad.ad_density if ad else 0.0
+        ad_total_area_px = ad.total_ad_area_px if ad else 0
+        ad_iab_standard_count = ad.iab_standard_count if ad else 0
+
+        # Phase 2: ad capture summary
+        ac = result.ad_capture_result
+        ad_captures_total = ac.total_captured if ac else 0
+        ad_captures_failed = ac.total_failed if ac else 0
+
+        # Phase 2: resource weight summary
+        rw = result.resource_weight
+        rw_total_bytes = rw.total_bytes if rw else 0
+        rw_content_1p_bytes = rw.content_1p_bytes if rw else 0
+        rw_cdn_bytes = rw.cdn_bytes if rw else 0
+        rw_tracker_bytes = rw.tracker_bytes if rw else 0
+        rw_ad_bytes = rw.ad_bytes if rw else 0
+        rw_functional_3p_bytes = rw.functional_3p_bytes if rw else 0
+        rw_unknown_3p_bytes = rw.unknown_3p_bytes if rw else 0
+
         async with self._conn.cursor() as cur:
             # Insert session
             await cur.execute(
@@ -170,8 +282,23 @@ class Database:
                     total_cookies_set, tracking_cookies_set,
                     consent_banner_detected, consent_cmp,
                     consent_button_text, consent_action_taken,
-                    screenshot_path, error, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    screenshot_path, error, status,
+                    fp_severity, fp_event_count, fp_canvas, fp_webgl,
+                    fp_audio, fp_font, fp_navigator, fp_storage,
+                    fp_unique_apis, fp_unique_entities,
+                    ad_count, ad_visible_count, ad_density,
+                    ad_total_area_px, ad_iab_standard_count,
+                    ad_captures_total, ad_captures_failed,
+                    rw_total_bytes, rw_content_1p_bytes, rw_cdn_bytes,
+                    rw_tracker_bytes, rw_ad_bytes,
+                    rw_functional_3p_bytes, rw_unknown_3p_bytes
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?,
+                    ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?
+                )
                 """,
                 (
                     site_id,
@@ -192,6 +319,15 @@ class Database:
                     result.screenshot_path,
                     result.error,
                     result.status.value,
+                    fp_severity, fp_event_count, fp_canvas, fp_webgl,
+                    fp_audio, fp_font, fp_navigator, fp_storage,
+                    fp_unique_apis, fp_unique_entities,
+                    ad_count, ad_visible_count, ad_density,
+                    ad_total_area_px, ad_iab_standard_count,
+                    ad_captures_total, ad_captures_failed,
+                    rw_total_bytes, rw_content_1p_bytes, rw_cdn_bytes,
+                    rw_tracker_bytes, rw_ad_bytes,
+                    rw_functional_3p_bytes, rw_unknown_3p_bytes,
                 ),
             )
             session_id = cur.lastrowid
@@ -203,8 +339,9 @@ class Database:
                     INSERT INTO requests (
                         session_id, url, domain, method, resource_type,
                         is_third_party, tracker_entity, tracker_category,
-                        status_code, response_size_bytes, timing_ms, timestamp
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        status_code, response_size_bytes, timing_ms, timestamp,
+                        resource_category, content_type
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -220,6 +357,8 @@ class Database:
                             r.response_size_bytes,
                             r.timing_ms,
                             r.timestamp,
+                            r.resource_category,
+                            r.content_type,
                         )
                         for r in result.requests
                     ],
@@ -257,6 +396,79 @@ class Database:
                         for c in result.cookies
                     ],
                 )
+
+            # Batch insert fingerprint events
+            if fp and fp.events:
+                await cur.executemany(
+                    """
+                    INSERT INTO fingerprint_events (
+                        session_id, api, method, call_stack_domain,
+                        tracker_entity, details, timestamp
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            session_id,
+                            e.api,
+                            e.method,
+                            e.call_stack_domain,
+                            e.tracker_entity,
+                            e.details,
+                            e.timestamp,
+                        )
+                        for e in fp.events
+                    ],
+                )
+
+            # Batch insert ad elements and captures
+            if ad and ad.ads:
+                for i, a in enumerate(ad.ads):
+                    await cur.execute(
+                        """
+                        INSERT INTO ad_elements (
+                            session_id, selector, tag_name, ad_id, ad_class,
+                            x, y, width, height, is_visible, is_iframe,
+                            iframe_src, iab_size, ad_network
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            session_id,
+                            a.selector,
+                            a.tag_name,
+                            a.ad_id,
+                            a.ad_class,
+                            a.x, a.y, a.width, a.height,
+                            a.is_visible,
+                            a.is_iframe,
+                            a.iframe_src,
+                            a.iab_size,
+                            a.ad_network,
+                        ),
+                    )
+                    ad_element_id = cur.lastrowid
+
+                    # Match capture to this ad element by index
+                    if ac and i < len(ac.captures):
+                        cap = ac.captures[i]
+                        await cur.execute(
+                            """
+                            INSERT INTO ad_captures (
+                                session_id, ad_element_id, ad_index,
+                                screenshot_path, metadata_path,
+                                width, height, capture_method
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                session_id,
+                                ad_element_id,
+                                cap.ad_index,
+                                cap.screenshot_path,
+                                cap.metadata_path,
+                                cap.width,
+                                cap.height,
+                                cap.capture_method,
+                            ),
+                        )
 
         await self._conn.commit()
         logger.debug(

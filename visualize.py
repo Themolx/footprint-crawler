@@ -478,6 +478,580 @@ def print_report(conn: sqlite3.Connection) -> None:
     print("=" * 70)
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# Phase 2 Charts
+# ═══════════════════════════════════════════════════════════════════════
+
+# ─── Chart 8: Fingerprint severity distribution ──────────────────────
+
+def chart_fingerprint_severity(conn: sqlite3.Connection, out: Path) -> None:
+    """Bar chart: how many sites use none/passive/active/aggressive fingerprinting."""
+    rows = conn.execute("""
+        SELECT fp_severity, COUNT(*) as cnt
+        FROM crawl_sessions
+        WHERE status='success' AND consent_mode='ignore' AND fp_severity IS NOT NULL
+        GROUP BY fp_severity
+        ORDER BY CASE fp_severity
+            WHEN 'none' THEN 0 WHEN 'passive' THEN 1
+            WHEN 'active' THEN 2 WHEN 'aggressive' THEN 3 END
+    """).fetchall()
+    if not rows:
+        return
+
+    levels = [r["fp_severity"] for r in rows]
+    counts = [r["cnt"] for r in rows]
+    colors = {"none": "#2ecc71", "passive": "#f39c12", "active": "#e74c3c", "aggressive": "#8e44ad"}
+    bar_colors = [colors.get(l, "#333") for l in levels]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    bars = ax.bar(levels, counts, color=bar_colors, edgecolor="white", linewidth=0.5)
+    ax.set_xlabel("Fingerprinting severity")
+    ax.set_ylabel("Number of sites")
+    ax.set_title("Browser Fingerprinting on Czech Websites", fontsize=14, fontweight="bold")
+    for bar, val in zip(bars, counts):
+        ax.text(bar.get_x() + bar.get_width()/2, val + 0.5, str(val), ha="center", fontsize=11)
+
+    plt.tight_layout()
+    fig.savefig(out / "fingerprint_severity.png", dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  -> {out / 'fingerprint_severity.png'}")
+
+
+# ─── Chart 9: Fingerprint vectors by entity ──────────────────────────
+
+def chart_fingerprint_vectors(conn: sqlite3.Connection, out: Path) -> None:
+    """Bar chart: which fingerprinting techniques are used, attributed to tracker entities."""
+    rows = conn.execute("""
+        SELECT api, tracker_entity, COUNT(*) as cnt
+        FROM fingerprint_events
+        WHERE tracker_entity IS NOT NULL
+        GROUP BY api, tracker_entity
+        ORDER BY cnt DESC
+    """).fetchall()
+    if not rows:
+        return
+
+    # Aggregate by API
+    api_counts = defaultdict(int)
+    for r in rows:
+        api_counts[r["api"]] += r["cnt"]
+
+    apis = sorted(api_counts, key=api_counts.get, reverse=True)
+    counts = [api_counts[a] for a in apis]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    colors = {"canvas": "#e74c3c", "webgl": "#3498db", "audio": "#9b59b6",
+              "navigator": "#f39c12", "font": "#1abc9c", "storage": "#e67e22"}
+    bar_colors = [colors.get(a, "#636e72") for a in apis]
+
+    ax.bar(apis, counts, color=bar_colors, edgecolor="white", linewidth=0.5)
+    ax.set_xlabel("Fingerprinting API")
+    ax.set_ylabel("Total events detected")
+    ax.set_title("Fingerprinting Techniques Used", fontsize=14, fontweight="bold")
+
+    plt.tight_layout()
+    fig.savefig(out / "fingerprint_vectors.png", dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  -> {out / 'fingerprint_vectors.png'}")
+
+
+# ─── Chart 10: Fingerprinting vs consent mode ────────────────────────
+
+def chart_fingerprint_vs_consent(conn: sqlite3.Connection, out: Path) -> None:
+    """Grouped bar: does fingerprinting change across consent modes?"""
+    rows = conn.execute("""
+        SELECT consent_mode, fp_severity, COUNT(*) as cnt
+        FROM crawl_sessions
+        WHERE status='success' AND fp_severity IS NOT NULL
+        GROUP BY consent_mode, fp_severity
+    """).fetchall()
+    if not rows:
+        return
+
+    modes = ["ignore", "accept", "reject"]
+    severities = ["none", "passive", "active", "aggressive"]
+    data = defaultdict(lambda: defaultdict(int))
+    for r in rows:
+        data[r["consent_mode"]][r["fp_severity"]] = r["cnt"]
+
+    x = range(len(modes))
+    width = 0.2
+    sev_colors = {"none": "#2ecc71", "passive": "#f39c12", "active": "#e74c3c", "aggressive": "#8e44ad"}
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    for i, sev in enumerate(severities):
+        vals = [data[m][sev] for m in modes]
+        ax.bar([xi + i * width for xi in x], vals, width,
+               label=sev, color=sev_colors.get(sev, "#333"))
+
+    ax.set_xticks([xi + 1.5 * width for xi in x])
+    ax.set_xticklabels(modes)
+    ax.set_ylabel("Number of sites")
+    ax.set_title("Fingerprinting Doesn't Care About Consent", fontsize=14, fontweight="bold")
+    ax.legend()
+
+    plt.tight_layout()
+    fig.savefig(out / "fingerprint_vs_consent.png", dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  -> {out / 'fingerprint_vs_consent.png'}")
+
+
+# ─── Chart 11: Ad density distribution ───────────────────────────────
+
+def chart_ad_density_distribution(conn: sqlite3.Connection, out: Path) -> None:
+    """Histogram of ad density percentages across all sites."""
+    rows = conn.execute("""
+        SELECT ad_density FROM crawl_sessions
+        WHERE status='success' AND consent_mode='ignore' AND ad_density > 0
+    """).fetchall()
+    if not rows:
+        return
+
+    densities = [r["ad_density"] * 100 for r in rows]
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.hist(densities, bins=30, color="#e74c3c", alpha=0.85, edgecolor="white")
+    ax.set_xlabel("Ad density (% of viewport)")
+    ax.set_ylabel("Number of sites")
+    ax.set_title("How Much of Czech Websites Is Advertising?", fontsize=14, fontweight="bold")
+    avg = sum(densities) / len(densities) if densities else 0
+    ax.axvline(x=avg, color="#2c3e50", linestyle="--", linewidth=2, label=f"Average: {avg:.1f}%")
+    ax.legend()
+
+    plt.tight_layout()
+    fig.savefig(out / "ad_density_distribution.png", dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  -> {out / 'ad_density_distribution.png'}")
+
+
+# ─── Chart 12: Ad network reach ──────────────────────────────────────
+
+def chart_ad_network_reach(conn: sqlite3.Connection, out: Path) -> None:
+    """Horizontal bar: which ad networks appear on the most sites."""
+    rows = conn.execute("""
+        SELECT ad_network, COUNT(DISTINCT cs.site_id) as sites, COUNT(*) as elements
+        FROM ad_elements ae
+        JOIN crawl_sessions cs ON ae.session_id = cs.id
+        WHERE ae.ad_network IS NOT NULL AND cs.consent_mode='ignore' AND cs.status='success'
+        GROUP BY ad_network ORDER BY sites DESC LIMIT 15
+    """).fetchall()
+    if not rows:
+        return
+
+    networks = [r["ad_network"] for r in rows][::-1]
+    sites = [r["sites"] for r in rows][::-1]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.barh(networks, sites, color="#e74c3c", alpha=0.85, edgecolor="white", linewidth=0.5)
+    ax.set_xlabel("Number of sites")
+    ax.set_title("Ad Networks on Czech Websites", fontsize=14, fontweight="bold")
+    ax.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+
+    plt.tight_layout()
+    fig.savefig(out / "ad_network_reach.png", dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  -> {out / 'ad_network_reach.png'}")
+
+
+# ─── Chart 13: Ad density by category ────────────────────────────────
+
+def chart_ad_density_by_category(conn: sqlite3.Connection, out: Path) -> None:
+    """Bar chart: average ad density by site category."""
+    rows = conn.execute("""
+        SELECT s.category, ROUND(AVG(cs.ad_density) * 100, 1) as avg_density,
+               COUNT(DISTINCT s.id) as sites
+        FROM crawl_sessions cs JOIN sites s ON cs.site_id = s.id
+        WHERE cs.consent_mode='ignore' AND cs.status='success' AND cs.ad_density > 0
+        GROUP BY s.category ORDER BY AVG(cs.ad_density) DESC
+    """).fetchall()
+    if not rows:
+        return
+
+    cats = [f"{r['category']}\n({r['sites']} sites)" for r in rows]
+    densities = [r["avg_density"] for r in rows]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    bars = ax.bar(cats, densities, color="#e67e22", alpha=0.85, edgecolor="white", linewidth=0.5)
+    ax.set_ylabel("Avg ad density (% of viewport)")
+    ax.set_title("Ad Density by Website Category", fontsize=14, fontweight="bold")
+    for bar, val in zip(bars, densities):
+        ax.text(bar.get_x() + bar.get_width()/2, val + 0.2, f"{val}%", ha="center", fontsize=10)
+
+    plt.tight_layout()
+    fig.savefig(out / "ad_density_by_category.png", dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  -> {out / 'ad_density_by_category.png'}")
+
+
+# ─── Chart 14: Ad density vs tracker count ───────────────────────────
+
+def chart_ad_density_vs_trackers(conn: sqlite3.Connection, out: Path) -> None:
+    """Scatter plot: correlation between ad density and number of trackers."""
+    rows = conn.execute("""
+        SELECT cs.ad_density * 100 as density, cs.third_party_requests as trackers,
+               s.category
+        FROM crawl_sessions cs JOIN sites s ON cs.site_id = s.id
+        WHERE cs.consent_mode='ignore' AND cs.status='success' AND cs.ad_density > 0
+    """).fetchall()
+    if not rows:
+        return
+
+    densities = [r["density"] for r in rows]
+    trackers = [r["trackers"] for r in rows]
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.scatter(trackers, densities, alpha=0.6, color="#e74c3c", edgecolors="#c0392b", linewidth=0.5)
+    ax.set_xlabel("3rd-party requests")
+    ax.set_ylabel("Ad density (% of viewport)")
+    ax.set_title("More Trackers = More Ads?", fontsize=14, fontweight="bold")
+
+    plt.tight_layout()
+    fig.savefig(out / "ad_density_vs_trackers.png", dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  -> {out / 'ad_density_vs_trackers.png'}")
+
+
+# ─── Chart 15: Resource weight breakdown ─────────────────────────────
+
+def chart_resource_weight_breakdown(conn: sqlite3.Connection, out: Path) -> None:
+    """Stacked bar per site category: bytes by resource category."""
+    rows = conn.execute("""
+        SELECT s.category,
+               ROUND(AVG(cs.rw_content_1p_bytes) / 1024.0, 0) as content_kb,
+               ROUND(AVG(cs.rw_cdn_bytes) / 1024.0, 0) as cdn_kb,
+               ROUND(AVG(cs.rw_tracker_bytes) / 1024.0, 0) as tracker_kb,
+               ROUND(AVG(cs.rw_ad_bytes) / 1024.0, 0) as ad_kb,
+               ROUND(AVG(cs.rw_functional_3p_bytes) / 1024.0, 0) as func_kb,
+               ROUND(AVG(cs.rw_unknown_3p_bytes) / 1024.0, 0) as unk_kb
+        FROM crawl_sessions cs JOIN sites s ON cs.site_id = s.id
+        WHERE cs.consent_mode='ignore' AND cs.status='success' AND cs.rw_total_bytes > 0
+        GROUP BY s.category ORDER BY AVG(cs.rw_total_bytes) DESC
+    """).fetchall()
+    if not rows:
+        return
+
+    cats = [r["category"] for r in rows]
+    content = [r["content_kb"] or 0 for r in rows]
+    cdn = [r["cdn_kb"] or 0 for r in rows]
+    tracker = [r["tracker_kb"] or 0 for r in rows]
+    ad = [r["ad_kb"] or 0 for r in rows]
+    func = [r["func_kb"] or 0 for r in rows]
+    unk = [r["unk_kb"] or 0 for r in rows]
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    x = range(len(cats))
+    ax.bar(x, content, label="Content (1P)", color="#2ecc71")
+    ax.bar(x, cdn, bottom=content, label="CDN", color="#3498db")
+    bottom2 = [c + d for c, d in zip(content, cdn)]
+    ax.bar(x, tracker, bottom=bottom2, label="Tracker", color="#e74c3c")
+    bottom3 = [b + t for b, t in zip(bottom2, tracker)]
+    ax.bar(x, ad, bottom=bottom3, label="Advertising", color="#f39c12")
+    bottom4 = [b + a for b, a in zip(bottom3, ad)]
+    ax.bar(x, func, bottom=bottom4, label="Functional 3P", color="#9b59b6")
+    bottom5 = [b + f for b, f in zip(bottom4, func)]
+    ax.bar(x, unk, bottom=bottom5, label="Unknown 3P", color="#95a5a6")
+
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(cats, fontsize=9, rotation=30, ha="right")
+    ax.set_ylabel("Avg KB per page")
+    ax.set_title("What Makes Up a Czech Webpage?", fontsize=14, fontweight="bold")
+    ax.legend(loc="upper right")
+
+    plt.tight_layout()
+    fig.savefig(out / "resource_weight_breakdown.png", dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  -> {out / 'resource_weight_breakdown.png'}")
+
+
+# ─── Chart 16: Resource weight pie chart ─────────────────────────────
+
+def chart_resource_weight_pie(conn: sqlite3.Connection, out: Path) -> None:
+    """Pie chart: average byte distribution across all sites."""
+    row = conn.execute("""
+        SELECT SUM(rw_content_1p_bytes) as content,
+               SUM(rw_cdn_bytes) as cdn,
+               SUM(rw_tracker_bytes) as tracker,
+               SUM(rw_ad_bytes) as ad,
+               SUM(rw_functional_3p_bytes) as func,
+               SUM(rw_unknown_3p_bytes) as unk
+        FROM crawl_sessions
+        WHERE status='success' AND consent_mode='ignore' AND rw_total_bytes > 0
+    """).fetchone()
+    if not row or not row["content"]:
+        return
+
+    labels = ["Content", "CDN", "Tracker", "Ad", "Functional 3P", "Unknown 3P"]
+    sizes = [row["content"] or 0, row["cdn"] or 0, row["tracker"] or 0,
+             row["ad"] or 0, row["func"] or 0, row["unk"] or 0]
+    colors = ["#2ecc71", "#3498db", "#e74c3c", "#f39c12", "#9b59b6", "#95a5a6"]
+
+    # Filter out zero segments
+    filtered = [(l, s, c) for l, s, c in zip(labels, sizes, colors) if s > 0]
+    if not filtered:
+        return
+    labels, sizes, colors = zip(*filtered)
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    wedges, texts, autotexts = ax.pie(
+        sizes, labels=labels, autopct="%1.1f%%",
+        colors=colors, startangle=90, pctdistance=0.85,
+    )
+    for text in autotexts:
+        text.set_fontsize(10)
+    ax.set_title("Where Does Bandwidth Go on Czech Websites?", fontsize=14, fontweight="bold")
+
+    plt.tight_layout()
+    fig.savefig(out / "resource_weight_pie.png", dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  -> {out / 'resource_weight_pie.png'}")
+
+
+# ─── Chart 17: Tracker bandwidth by entity ───────────────────────────
+
+def chart_tracker_bandwidth_by_entity(conn: sqlite3.Connection, out: Path) -> None:
+    """Bar: which tracker entities consume the most bandwidth."""
+    rows = conn.execute("""
+        SELECT r.tracker_entity,
+               SUM(r.response_size_bytes) / 1024 as total_kb
+        FROM requests r
+        JOIN crawl_sessions cs ON r.session_id = cs.id
+        WHERE r.tracker_entity IS NOT NULL AND cs.consent_mode='ignore'
+              AND cs.status='success' AND r.response_size_bytes > 0
+        GROUP BY r.tracker_entity
+        ORDER BY total_kb DESC LIMIT 15
+    """).fetchall()
+    if not rows:
+        return
+
+    entities = [r["tracker_entity"] for r in rows][::-1]
+    kb = [r["total_kb"] for r in rows][::-1]
+
+    fig, ax = plt.subplots(figsize=(10, 7))
+    colors_map = {
+        "Google": "#4285F4", "Meta": "#1877F2", "Seznam.cz": "#cc0000",
+        "Microsoft": "#00a4ef", "Amazon": "#FF9900", "Criteo": "#f5811f",
+        "Adform": "#6c5ce7", "Gemius": "#00b894",
+    }
+    bar_colors = [colors_map.get(e, "#636e72") for e in entities]
+
+    bars = ax.barh(entities, kb, color=bar_colors, edgecolor="white", linewidth=0.5)
+    ax.set_xlabel("Total KB transferred")
+    ax.set_title("Bandwidth Cost of Surveillance", fontsize=14, fontweight="bold")
+
+    for bar, val in zip(bars, kb):
+        ax.text(val + 10, bar.get_y() + bar.get_height()/2,
+                f"{val:,.0f} KB", va="center", fontsize=9)
+
+    plt.tight_layout()
+    fig.savefig(out / "tracker_bandwidth_by_entity.png", dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  -> {out / 'tracker_bandwidth_by_entity.png'}")
+
+
+# ─── Chart 18: Resource weight vs consent mode ───────────────────────
+
+def chart_resource_weight_vs_consent(conn: sqlite3.Connection, out: Path) -> None:
+    """Grouped bar: does accepting cookies increase page weight?"""
+    rows = conn.execute("""
+        SELECT consent_mode,
+               ROUND(AVG(rw_total_bytes) / 1024.0, 0) as avg_total_kb,
+               ROUND(AVG(rw_tracker_bytes + rw_ad_bytes) / 1024.0, 0) as avg_tracking_kb,
+               ROUND(AVG(rw_content_1p_bytes) / 1024.0, 0) as avg_content_kb
+        FROM crawl_sessions
+        WHERE status='success' AND rw_total_bytes > 0
+        GROUP BY consent_mode ORDER BY consent_mode
+    """).fetchall()
+    if not rows:
+        return
+
+    modes = [r["consent_mode"] for r in rows]
+    total_kb = [r["avg_total_kb"] or 0 for r in rows]
+    tracking_kb = [r["avg_tracking_kb"] or 0 for r in rows]
+    content_kb = [r["avg_content_kb"] or 0 for r in rows]
+
+    x = range(len(modes))
+    width = 0.25
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.bar([i - width for i in x], total_kb, width, label="Total", color="#2c3e50")
+    ax.bar(list(x), tracking_kb, width, label="Tracker + Ad", color="#e74c3c")
+    ax.bar([i + width for i in x], content_kb, width, label="Content", color="#2ecc71")
+
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(modes)
+    ax.set_ylabel("Avg KB per page")
+    ax.set_title("Does Accepting Cookies Increase Page Weight?", fontsize=14, fontweight="bold")
+    ax.legend()
+
+    plt.tight_layout()
+    fig.savefig(out / "resource_weight_vs_consent.png", dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  -> {out / 'resource_weight_vs_consent.png'}")
+
+
+# ─── Phase 2 CSV exports ─────────────────────────────────────────────
+
+def export_csv_phase2(conn: sqlite3.Connection, out: Path) -> None:
+    """Export Phase 2 tables as CSV."""
+    exports = {
+        "fingerprint_events.csv": """
+            SELECT fe.api, fe.method, fe.call_stack_domain, fe.tracker_entity,
+                   fe.details, fe.timestamp,
+                   s.domain as site_domain, cs.consent_mode
+            FROM fingerprint_events fe
+            JOIN crawl_sessions cs ON fe.session_id = cs.id
+            JOIN sites s ON cs.site_id = s.id
+            WHERE cs.status='success'
+            ORDER BY s.domain, cs.consent_mode
+        """,
+        "fingerprint_summary.csv": """
+            SELECT s.domain, s.category, cs.consent_mode,
+                   cs.fp_severity, cs.fp_event_count,
+                   cs.fp_canvas, cs.fp_webgl, cs.fp_audio,
+                   cs.fp_font, cs.fp_navigator, cs.fp_storage,
+                   cs.fp_unique_apis, cs.fp_unique_entities
+            FROM crawl_sessions cs
+            JOIN sites s ON cs.site_id = s.id
+            WHERE cs.status='success' AND cs.fp_severity IS NOT NULL
+            ORDER BY s.domain, cs.consent_mode
+        """,
+        "ad_elements.csv": """
+            SELECT s.domain, s.category, cs.consent_mode,
+                   ae.selector, ae.tag_name, ae.ad_id,
+                   ae.width, ae.height, ae.iab_size, ae.ad_network,
+                   ae.is_iframe, ae.iframe_src
+            FROM ad_elements ae
+            JOIN crawl_sessions cs ON ae.session_id = cs.id
+            JOIN sites s ON cs.site_id = s.id
+            WHERE cs.status='success'
+            ORDER BY s.domain, cs.consent_mode
+        """,
+        "resource_weight_by_session.csv": """
+            SELECT s.domain, s.category, cs.consent_mode,
+                   cs.rw_total_bytes, cs.rw_content_1p_bytes,
+                   cs.rw_cdn_bytes, cs.rw_tracker_bytes, cs.rw_ad_bytes,
+                   cs.rw_functional_3p_bytes, cs.rw_unknown_3p_bytes
+            FROM crawl_sessions cs
+            JOIN sites s ON cs.site_id = s.id
+            WHERE cs.status='success' AND cs.rw_total_bytes > 0
+            ORDER BY s.domain, cs.consent_mode
+        """,
+        "resource_weight_by_entity.csv": """
+            SELECT r.tracker_entity, r.resource_category,
+                   COUNT(*) as request_count,
+                   SUM(r.response_size_bytes) as total_bytes,
+                   COUNT(DISTINCT cs.site_id) as sites
+            FROM requests r
+            JOIN crawl_sessions cs ON r.session_id = cs.id
+            WHERE r.tracker_entity IS NOT NULL AND cs.consent_mode='ignore'
+                  AND cs.status='success'
+            GROUP BY r.tracker_entity, r.resource_category
+            ORDER BY total_bytes DESC
+        """,
+    }
+
+    csv_dir = out / "csv"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+
+    for filename, query in exports.items():
+        try:
+            rows = conn.execute(query).fetchall()
+        except sqlite3.OperationalError:
+            continue
+        if not rows:
+            continue
+        filepath = csv_dir / filename
+        with open(filepath, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(rows[0].keys())
+            writer.writerows(rows)
+        print(f"  -> {filepath} ({len(rows)} rows)")
+
+
+# ─── Ad gallery (HTML) ───────────────────────────────────────────────
+
+def generate_ad_gallery(conn: sqlite3.Connection, out: Path) -> None:
+    """Generate a self-contained HTML gallery of all captured ad screenshots."""
+    rows = conn.execute("""
+        SELECT ac.screenshot_path, ac.width, ac.height, ac.capture_method,
+               ae.ad_network, ae.iab_size, ae.tag_name,
+               s.domain, s.category, cs.consent_mode
+        FROM ad_captures ac
+        JOIN crawl_sessions cs ON ac.session_id = cs.id
+        JOIN sites s ON cs.site_id = s.id
+        LEFT JOIN ad_elements ae ON ac.ad_element_id = ae.id
+        WHERE ac.screenshot_path IS NOT NULL AND ac.capture_method != 'failed'
+        ORDER BY s.domain, cs.consent_mode
+    """).fetchall()
+
+    if not rows:
+        return
+
+    # Build HTML
+    cards_html = []
+    networks = set()
+    for r in rows:
+        network = r["ad_network"] or "unknown"
+        networks.add(network)
+        size_label = r["iab_size"] or f"{r['width']}x{r['height']}"
+        cards_html.append(f"""
+        <div class="card" data-network="{network}" data-consent="{r['consent_mode']}"
+             data-site="{r['domain']}">
+            <img src="../../{r['screenshot_path']}" alt="Ad from {r['domain']}"
+                 loading="lazy" onclick="this.classList.toggle('enlarged')">
+            <div class="meta">
+                <strong>{r['domain']}</strong> [{r['consent_mode']}]<br>
+                {network} &middot; {size_label} &middot; {r['tag_name']}
+            </div>
+        </div>""")
+
+    filter_buttons = "".join(
+        f'<button onclick="filterNetwork(\'{n}\')">{n}</button>' for n in sorted(networks)
+    )
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<title>Ad Gallery — Footprint Crawler</title>
+<style>
+body {{ font-family: -apple-system, sans-serif; background: #1a1a2e; color: #eee; margin: 0; padding: 20px; }}
+h1 {{ text-align: center; }}
+.stats {{ text-align: center; margin: 10px 0; color: #aaa; }}
+.filters {{ text-align: center; margin: 15px 0; }}
+.filters button {{ background: #333; color: #eee; border: 1px solid #555; padding: 5px 12px;
+    margin: 3px; cursor: pointer; border-radius: 4px; }}
+.filters button:hover, .filters button.active {{ background: #e74c3c; border-color: #e74c3c; }}
+.grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; padding: 20px 0; }}
+.card {{ background: #16213e; border-radius: 8px; overflow: hidden; transition: 0.2s; }}
+.card.hidden {{ display: none; }}
+.card img {{ width: 100%; display: block; cursor: pointer; transition: 0.2s; }}
+.card img.enlarged {{ position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    width: auto; max-width: 90vw; max-height: 90vh; z-index: 999; box-shadow: 0 0 50px rgba(0,0,0,0.8); }}
+.meta {{ padding: 8px; font-size: 12px; color: #aaa; }}
+</style></head><body>
+<h1>Ad Specimen Collection</h1>
+<div class="stats">{len(rows)} ads captured from Czech websites</div>
+<div class="filters">
+    <button onclick="filterNetwork('all')" class="active">All</button>
+    {filter_buttons}
+</div>
+<div class="grid">{''.join(cards_html)}</div>
+<script>
+function filterNetwork(net) {{
+    document.querySelectorAll('.card').forEach(c => {{
+        c.classList.toggle('hidden', net !== 'all' && c.dataset.network !== net);
+    }});
+    document.querySelectorAll('.filters button').forEach(b => {{
+        b.classList.toggle('active', b.textContent === net || (net === 'all' && b.textContent === 'All'));
+    }});
+}}
+</script></body></html>"""
+
+    gallery_path = out / "ad_gallery.html"
+    with open(gallery_path, "w") as f:
+        f.write(html)
+    print(f"  -> {gallery_path} ({len(rows)} ads)")
+
+
 # ─── Main ─────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -504,7 +1078,7 @@ def main() -> None:
     do_graph = args.export_graph or args.all
 
     if generate_charts or args.all or (not args.export_csv and not args.export_graph):
-        print("\nGenerating charts...")
+        print("\nGenerating Phase 1 charts...")
         chart_consent_comparison(conn, out)
         chart_top_trackers(conn, out)
         chart_tracking_by_category(conn, out)
@@ -513,9 +1087,26 @@ def main() -> None:
         chart_top_tracked_sites(conn, out)
         chart_cookie_lifetimes(conn, out)
 
+        print("\nGenerating Phase 2 charts...")
+        chart_fingerprint_severity(conn, out)
+        chart_fingerprint_vectors(conn, out)
+        chart_fingerprint_vs_consent(conn, out)
+        chart_ad_density_distribution(conn, out)
+        chart_ad_network_reach(conn, out)
+        chart_ad_density_by_category(conn, out)
+        chart_ad_density_vs_trackers(conn, out)
+        chart_resource_weight_breakdown(conn, out)
+        chart_resource_weight_pie(conn, out)
+        chart_tracker_bandwidth_by_entity(conn, out)
+        chart_resource_weight_vs_consent(conn, out)
+
+        print("\nGenerating ad gallery...")
+        generate_ad_gallery(conn, out)
+
     if do_csv:
         print("\nExporting CSV files...")
         export_csv(conn, out)
+        export_csv_phase2(conn, out)
 
     if do_graph:
         print("\nExporting network graph...")
