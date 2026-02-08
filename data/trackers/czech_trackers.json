@@ -1,0 +1,67 @@
+{
+  "seznam_ads": {
+    "name": "Seznam.cz",
+    "category": "advertising",
+    "domains": ["sklik.cz", "imedia.cz", "im.cz", "sssp.cz", "ssp.seznam.cz"]
+  },
+  "seznam_analytics": {
+    "name": "Seznam.cz",
+    "category": "analytics",
+    "domains": ["toplist.cz", "h.seznam.cz", "search.seznam.cz"]
+  },
+  "zbozi": {
+    "name": "Seznam.cz",
+    "category": "analytics",
+    "domains": ["zbozi.cz", "zbozicdn.cz"]
+  },
+  "heureka": {
+    "name": "Heureka Group",
+    "category": "analytics",
+    "domains": ["heureka.cz", "heureka.sk", "heureka-mereni.cz"]
+  },
+  "glami": {
+    "name": "Heureka Group",
+    "category": "analytics",
+    "domains": ["glami.cz", "glami.eco", "glami.sk"]
+  },
+  "gemius": {
+    "name": "Gemius",
+    "category": "analytics",
+    "domains": ["gemius.com", "hit.gemius.pl", "gemius.pl", "gemiuscdn.com"]
+  },
+  "adform": {
+    "name": "Adform",
+    "category": "advertising",
+    "domains": ["adform.net", "adform.com", "adformdsp.net"]
+  },
+  "r2b2": {
+    "name": "R2B2",
+    "category": "advertising",
+    "domains": ["r2b2.cz", "r2b2.io"]
+  },
+  "impression_media": {
+    "name": "Impression Media",
+    "category": "advertising",
+    "domains": ["impressionmedia.cz"]
+  },
+  "mediaresearch": {
+    "name": "Mediaresearch",
+    "category": "analytics",
+    "domains": ["netmonitor.cz", "mediaresearch.cz", "research.cz"]
+  },
+  "smartsupp": {
+    "name": "Smartsupp",
+    "category": "analytics",
+    "domains": ["smartsupp.com", "smartsuppchat.com"]
+  },
+  "bloomreach": {
+    "name": "Bloomreach",
+    "category": "analytics",
+    "domains": ["exponea.com", "bloomreach.com"]
+  },
+  "lmc": {
+    "name": "LMC",
+    "category": "analytics",
+    "domains": ["lmc.eu", "teamio.com"]
+  }
+}

@@ -1,0 +1,53 @@
+crawler:
+  concurrency: 8
+  page_timeout_ms: 30000
+  consent_timeout_ms: 10000
+  post_consent_wait_ms: 5000
+  scroll_delay_ms: 2000
+  inter_site_delay_ms: 2000
+  max_retries: 2
+  screenshot: false
+  headless: true
+
+browser:
+  locale: "cs-CZ"
+  timezone: "Europe/Prague"
+  geolocation:
+    latitude: 50.0755
+    longitude: 14.4378
+  viewport:
+    width: 1920
+    height: 1080
+  user_agent: null
+
+database:
+  path: "data/footprint.db"
+
+consent_patterns:
+  accept:
+    - "přijmout vše"
+    - "souhlasím"
+    - "accept all"
+    - "přijmout"
+    - "souhlasím se vším"
+    - "povolit vše"
+    - "Souhlasím"
+    - "Rozumím"
+    - "Přijmout a zavřít"
+    - "Přijmout cookies"
+    - "OK"
+  reject:
+    - "odmítnout vše"
+    - "odmítnout"
+    - "pouze nezbytné"
+    - "reject all"
+    - "nesouhlasím"
+    - "pouze technické"
+    - "jen nezbytné"
+    - "Odmítnout vše"
+
+sites_file: "data/sites/czech_top_100.csv"
+
+output:
+  export_dir: "output/"
+  screenshot_dir: "output/screenshots/"
